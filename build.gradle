@@ -1,0 +1,60 @@
+plugins {
+    id 'org.jetbrains.kotlin.jvm' version "$kotlinVersion"
+    id 'maven-publish'
+}
+
+ext {
+    def (agpMajorVersion, agpMinorVersion, agpPatchVersion) = agpVersion.split("\\.")
+    int lintMajorVersion = (agpMajorVersion as Integer) + 23                                 
+    lintVersion = "$lintMajorVersion.$agpMinorVersion.$agpPatchVersion"
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+compileKotlin {
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_1_8.toString()
+        allWarningsAsErrors = false
+	freeCompilerArgs += "-Xjvm-default=enable"
+    }
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+dependencies {
+    api "com.android.tools.lint:lint-model:$lintVersion"
+    api "com.android.tools.external.com-intellij:intellij-core:$lintVersion"
+    api "com.android.tools.external.com-intellij:kotlin-compiler:$lintVersion"
+    api "com.android.tools.external.org-jetbrains:uast:$lintVersion"
+    api "com.android.tools.build:manifest-merger:$lintVersion"
+    api "com.android.tools:common:$lintVersion"
+    api "com.android.tools.layoutlib:layoutlib-api:$lintVersion"
+    api "com.android.tools:sdk-common:$lintVersion"
+    api "com.android.tools:sdklib:$lintVersion"
+    api "commons-io:commons-io:2.4"
+    api "net.sf.kxml:kxml2:2.3.0"
+    api "org.jetbrains.kotlin:kotlin-reflect:$kotlinVersion"
+    api "org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlinVersion"
+    api "org.ow2.asm:asm:9.1"
+    api "org.ow2.asm:asm-tree:9.1"
+    runtimeOnly "com.android.tools.build:builder-model:$agpVersion"
+    runtimeOnly "com.google.guava:guava:30.1-jre"
+}
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            groupId = 'com.android.tools.lint'
+            artifactId = 'lint-api'
+            version = lintVersion
+
+            from components.java
+        }
+    }
+}
