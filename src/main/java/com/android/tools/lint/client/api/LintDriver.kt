@@ -85,7 +85,6 @@ import com.android.tools.lint.detector.api.isXmlFile
 import com.android.tools.lint.model.PathVariables
 import com.android.utils.Pair
 import com.android.utils.SdkUtils.isBitmapFile
-import com.google.common.annotations.Beta
 import com.google.common.annotations.VisibleForTesting
 import com.google.common.base.Objects
 import com.google.common.base.Splitter
@@ -156,7 +155,6 @@ import kotlin.system.measureTimeMillis
  * **NOTE: This is not a public or final API; if you rely on this be
  * prepared to adjust your code for the next tools release.**
  */
-@Beta
 class LintDriver(
     /** The [registry] containing issues to be checked. */
     var registry: IssueRegistry,
@@ -365,6 +363,9 @@ class LintDriver(
     /** The mode that the driver is currently running in. */
     var mode: DriverMode = DriverMode.GLOBAL
         private set
+
+    /** Annotation names marking classes to skip during analysis */
+    var skipAnnotations: List<String>? = null
 
     /**
      * Returns the project containing a given file, or null if not
@@ -1383,7 +1384,7 @@ class LintDriver(
                     if (files != null) {
                         checkIndividualResources(
                             project, main, xmlDetectors, dirChecks,
-                            binaryChecks, files
+                            binaryChecks, files, project.manifestFiles
                         )
                     } else {
                         val resourceFolders = project.resourceFolders
@@ -1481,7 +1482,7 @@ class LintDriver(
                     // Gradle Kotlin Script? Use Java parsing mechanism.
                     val uFile = context.uastParser.parse(context)
                     if (uFile != null) {
-                        context.setJavaFile(uFile.psi) // needed for getLocation
+                        context.setJavaFile(uFile.sourcePsi) // needed for getLocation
                         context.uastFile = uFile
                         fireEvent(EventType.SCANNING_FILE, context)
 
@@ -1638,8 +1639,7 @@ class LintDriver(
         }
 
         val classFolders = project.javaClassFolders
-        val classEntries: List<ClassEntry>
-        classEntries = if (classFolders.isEmpty()) {
+        val classEntries: List<ClassEntry> = if (classFolders.isEmpty()) {
             // This should be a lint error only if there are source files
             val hasSourceFiles: Boolean = project.javaSourceFolders.any { folder -> folder.walk().any { it.isFile } }
             if (hasSourceFiles) {
@@ -1656,7 +1656,7 @@ class LintDriver(
             }
             emptyList()
         } else {
-            ClassEntry.fromClassPath(client, classFolders, true)
+            ClassEntry.fromClassPath(client, classFolders)
         }
 
         // Actually run the detectors. Libraries should be called before the main classes.
@@ -1664,7 +1664,7 @@ class LintDriver(
         val libraryDetectors = scopeDetectors[Scope.JAVA_LIBRARIES]
         if (libraryDetectors != null && libraryDetectors.isNotEmpty()) {
             val libraries = project.getJavaLibraries(false)
-            val libraryEntries = ClassEntry.fromClassPath(client, libraries, true)
+            val libraryEntries = ClassEntry.fromClassPath(client, libraries)
             runClassDetectors(libraryDetectors, libraryEntries, project, main, fromLibrary = true)
         }
 
@@ -1693,11 +1693,12 @@ class LintDriver(
             }
         }
 
-        val entries = ClassEntry.fromClassFiles(client, classFiles, classFolders, true)
         val classDetectors = scopeDetectors[Scope.CLASS_FILE]
-        if (classDetectors != null && classDetectors.isNotEmpty() && entries.isNotEmpty()) {
-            entries.sort()
-            runClassDetectors(classDetectors, entries, project, main, fromLibrary = false)
+        if (classDetectors != null && classDetectors.isNotEmpty()) {
+            val entries = ClassEntry.fromClassFiles(client, classFiles, classFolders)
+            if (entries.isNotEmpty()) {
+                runClassDetectors(classDetectors, entries, project, main, fromLibrary = false)
+            }
         }
     }
 
@@ -1732,19 +1733,7 @@ class LintDriver(
             }
             prev = entry
 
-            val reader: ClassReader
-            val classNode: ClassNode
-            try {
-                reader = ClassReader(entry.bytes)
-                classNode = ClassNode()
-                reader.accept(classNode, 0 /* flags */)
-            } catch (t: Throwable) {
-                client.log(
-                    null,
-                    "Error processing ${entry.path()}: broken class file? ($t)"
-                )
-                continue
-            }
+            val classNode = entry.visit(client) ?: continue
 
             var peek: ClassNode?
             while (true) {
@@ -1860,19 +1849,17 @@ class LintDriver(
                 return null
             }
 
-            try {
-                val bytes = client.readBytes(classFile)
-                val reader = ClassReader(bytes)
-                val classNode = ClassNode()
-                reader.accept(classNode, flags)
-
-                return classNode
+            val bytes = try {
+                client.readBytes(classFile)
             } catch (t: Throwable) {
                 client.log(
                     null,
-                    "Error processing ${classFile.path}: broken class file? ($t)"
+                    "Error reading ${classFile.path}: ${t.message}"
                 )
+                return null
             }
+
+            return ClassEntry.visit(client, classFile, null, bytes, ClassNode(), flags) as? ClassNode
         }
 
         return null
@@ -2040,7 +2027,7 @@ class LintDriver(
         val testContexts = sourceList.testContexts
         val testFixturesContexts = sourceList.testFixturesContexts
         val generatedContexts = sourceList.generatedContexts
-        val uElementVisitor = UElementVisitor(parser, uastScanners)
+        val uElementVisitor = UElementVisitor(this, parser, uastScanners)
 
         if (visitUastDetectors(srcContexts, uElementVisitor)) {
             return
@@ -2067,7 +2054,7 @@ class LintDriver(
             else
                 filterTestScanners(uastScanners)
             if (testScanners.isNotEmpty()) {
-                val uTestVisitor = UElementVisitor(parser, testScanners)
+                val uTestVisitor = UElementVisitor(this, parser, testScanners)
                 if (visitUastDetectors(testContexts, uTestVisitor)) {
                     return
                 }
@@ -2341,7 +2328,8 @@ class LintDriver(
         xmlDetectors: List<XmlScanner>,
         dirChecks: List<Detector>?,
         binaryChecks: List<Detector>?,
-        files: List<File>
+        files: List<File>,
+        manifestFiles: List<File>
     ) {
         for (file in files) {
             if (file.isDirectory) {
@@ -2357,7 +2345,7 @@ class LintDriver(
                     // Yes
                     checkResFolder(project, main, file, xmlDetectors, dirChecks, binaryChecks)
                 }
-            } else if (file.isFile && isXmlFile(file) && file.name != ANDROID_MANIFEST_XML) {
+            } else if (file.isFile && isXmlFile(file) && file.name != ANDROID_MANIFEST_XML && !manifestFiles.contains(file)) {
                 // Yes, find out its resource type
                 val folderName = file.parentFile.name
                 val type = ResourceFolderType.getFolderType(folderName)
@@ -2959,6 +2947,10 @@ class LintDriver(
         override fun getRootDir(): File? = delegate.getRootDir()
 
         override val pathVariables: PathVariables get() = delegate.pathVariables
+
+        override fun isEdited(file: File, returnIfUnknown: Boolean, savedSinceMsAgo: Long): Boolean {
+            return delegate.isEdited(file, returnIfUnknown, savedSinceMsAgo)
+        }
     }
 
     private val runLaterOutsideReadActionList = mutableListOf<Runnable>()
@@ -3439,7 +3431,7 @@ class LintDriver(
         if (names?.isNotEmpty() == true) {
             message += " (but can be with ${
             formatList(
-                names.map { "`@${it.substring(it.lastIndexOf('.') + 1)}`" }.toList(),
+                names.map { "`@$it`" }.toList(),
                 sort = false,
                 useConjunction = true
             )
@@ -3650,7 +3642,7 @@ class LintDriver(
                 sb.append("You can try disabling it with something like this:\n")
                 val indent = "\u00a0\u00a0\u00a0\u00a0" // non-breaking spaces
                 sb.append("${indent}android {\n")
-                sb.append("$indent${indent}lintOptions {\n")
+                sb.append("$indent${indent}lint {\n")
                 sb.append("$indent$indent${indent}disable ${associated.second.joinToString { "\"${it.id}\"" }}\n")
                 sb.append("$indent$indent}\n")
                 sb.append("$indent}\n")
@@ -3778,7 +3770,7 @@ class LintDriver(
             throwable: Throwable,
             sb: StringBuilder,
             skipFrames: Int = 0,
-            maxFrames: Int = 8
+            maxFrames: Int = 100
         ) {
             val stackTrace = throwable.stackTrace
             var count = 0

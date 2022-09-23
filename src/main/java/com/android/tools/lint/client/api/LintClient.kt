@@ -36,7 +36,6 @@ import com.android.ide.common.resources.ResourceItem
 import com.android.ide.common.resources.ResourceRepository
 import com.android.ide.common.util.PathString
 import com.android.manifmerger.Actions
-import com.android.prefs.AndroidLocationsException
 import com.android.prefs.AndroidLocationsSingleton
 import com.android.sdklib.IAndroidTarget
 import com.android.sdklib.SdkVersionInfo
@@ -64,7 +63,6 @@ import com.android.utils.CharSequences
 import com.android.utils.Pair
 import com.android.utils.XmlUtils
 import com.android.utils.findGradleBuildFile
-import com.google.common.annotations.Beta
 import com.google.common.base.Splitter
 import com.google.common.collect.Lists
 import com.google.common.collect.Maps
@@ -103,7 +101,6 @@ import kotlin.math.max
  * **NOTE: This is not a public or final API; if you rely on this be
  * prepared to adjust your code for the next tools release.**
  */
-@Beta
 abstract class LintClient {
 
     protected constructor(clientName: String) {
@@ -394,6 +391,19 @@ abstract class LintClient {
     @Throws(IOException::class)
     open fun readBytes(resourcePath: PathString): ByteArray =
         resourcePath.toFile()?.readBytes() ?: throw FileNotFoundException(resourcePath.toString())
+
+    /**
+     * Returns whether the given [file] has been edited since the last
+     * save, or recently saved (within the last [savedSinceMsAgo]
+     * milliseconds, which defaults to 5 minutes; if -1 it will not
+     * consider unmodified files.)
+     *
+     * If unknown or unsupported by this [LintClient], returns
+     * [returnIfUnknown].
+     */
+    open fun isEdited(file: File, returnIfUnknown: Boolean = true, savedSinceMsAgo: Long = 5 * 60 * 1000L): Boolean {
+        return returnIfUnknown
+    }
 
     /**
      * Returns the list of source folders for Java source files
@@ -949,7 +959,14 @@ abstract class LintClient {
         get() = dirToProject.values
 
     /** Path variables to use when reading and writing paths */
-    open val pathVariables = PathVariables()
+    open val pathVariables: PathVariables
+        // Lazy initialization since we'll want to overridden state (like this.sdkHome()) which
+        // is not yet initialized when the class is instantiated
+        get() = _pathVariables ?: PathVariables().apply {
+            addDefaultPathVariables(this)
+            _pathVariables = this
+        }
+    private var _pathVariables: PathVariables? = null // backing field for [pathVariables]
 
     /**
      * Registers the given project for the given directory. This can be
@@ -1203,11 +1220,11 @@ abstract class LintClient {
     open fun createSuperClassMap(project: Project): Map<String, String> {
         val libraries = project.getJavaLibraries(true)
         val classFolders = project.javaClassFolders
-        val classEntries = ClassEntry.fromClassPath(this, classFolders, true)
+        val classEntries = ClassEntry.fromClassPath(this, classFolders)
         if (libraries.isEmpty()) {
             return ClassEntry.createSuperClassMap(this, classEntries)
         }
-        val libraryEntries = ClassEntry.fromClassPath(this, libraries, true)
+        val libraryEntries = ClassEntry.fromClassPath(this, libraries)
         return ClassEntry.createSuperClassMap(this, libraryEntries, classEntries)
     }
 
@@ -1237,8 +1254,8 @@ abstract class LintClient {
      * Finds any custom lint rule jars that should be included for
      * analysis, regardless of project.
      *
-     * The default implementation locates custom lint jars in
-     * ~/.android/lint/ and in $ANDROID_LINT_JARS
+     * The default implementation locates custom lint jars set via
+     * $ANDROID_LINT_JARS
      *
      * @return a list of rule jars (possibly empty).
      */
@@ -1249,45 +1266,8 @@ abstract class LintClient {
         }
 
         // Look for additional detectors registered by the user, via
-        // (1) an environment variable (useful for build servers etc), and
-        // (2) via jar files in the .android/lint directory
+        // an environment variable
         var files: MutableList<File>? = null
-        try {
-            val lint = AndroidLocationsSingleton.prefsLocation.resolve("lint").toFile()
-            if (lint.exists()) {
-                val list = lint.listFiles()
-                if (list != null) {
-                    for (jarFile in list) {
-                        if (endsWith(jarFile.name, DOT_JAR)) {
-                            if (files == null) {
-                                files = ArrayList()
-                            }
-                            files.add(jarFile)
-
-                            // Don't flag the same warnings for each analyzed module -- doing it in the reporting
-                            // task is enough and avoids a lot of redundant/duplicate warnings
-                            if (warnDeprecated && driver?.mode != LintDriver.DriverMode.ANALYSIS_ONLY) {
-                                // TODO(b/197755365) Once this behavior changes here in LintClient, update AGP's
-                                //  behavior in AndroidLintTask and AndroidLintAnalysisTask, and update the message in
-                                //  AndroidLintTextOutputTask accordingly.
-                                val message =
-                                    "Loaded lint jar file from ${jarFile.parent} (${jarFile.name}); this will stop " +
-                                        "working soon. If you need to push lint rules into a build, use the " +
-                                        "`ANDROID_LINT_JARS` environment variable or the `--lint-rule-jars` " +
-                                        "flag or a `lint.xml` file setting `<lint lintJars=\"path\"...>`"
-                                report(this, IssueRegistry.LINT_WARNING, message, jarFile, driver = driver)
-                                if (isStudio) {
-                                    log(Severity.WARNING, null, message, jarFile.parent, jarFile.name)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (ignore: AndroidLocationsException) {
-            // Ignore -- no android dir, so no rules to load.
-        }
-
         val lintClassPath = System.getenv("ANDROID_LINT_JARS")
         if (lintClassPath != null && lintClassPath.isNotEmpty()) {
             val paths = lintClassPath.split(File.pathSeparator)
@@ -1942,6 +1922,25 @@ abstract class LintClient {
         }
 
         return root
+    }
+
+    private fun addDefaultPathVariables(variables: PathVariables) {
+        // A few additional path variables for lint checks that issues warnings files in home directories,
+        // gradle downloaded directories etc. This is defined here such that Studio can interpret these
+        // in baselines as well.
+        with(variables) {
+            val userHome = System.getProperty("user.home")
+            add("ANDROID_PREFS", AndroidLocationsSingleton.prefsLocation.toFile(), false)
+            getSdkHome()?.let { add("ANDROID_HOME", it, false) }
+            // See org.gradle.wrapper.GradleUserHomeLookup
+            val gradleUserHome =
+                System.getProperty("gradle.user.home")
+                    ?: System.getenv("GRADLE_USER_HOME")
+                    ?: "$userHome/.gradle"
+            add("GRADLE_USER_HOME", File(gradleUserHome), false)
+            add("HOME", File(userHome), false)
+            sort()
+        }
     }
 
     companion object {

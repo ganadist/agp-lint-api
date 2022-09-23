@@ -38,14 +38,12 @@ import com.android.tools.lint.detector.api.Severity
 import com.android.tools.lint.detector.api.StringOption
 import com.android.utils.SdkUtils
 import com.android.utils.iterator
-import com.google.common.annotations.Beta
 import com.google.common.base.Splitter
+import com.intellij.openapi.util.io.FileUtil
 import org.w3c.dom.Element
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserException
-import java.io.BufferedWriter
 import java.io.File
-import java.io.FileWriter
 import java.io.IOException
 import java.io.Writer
 import java.nio.file.Path
@@ -138,7 +136,6 @@ import kotlin.math.max
  * **NOTE: This is not a public or final API; if you rely on this be
  * prepared to adjust your code for the next tools release.**
  */
-@Beta
 open class LintXmlConfiguration protected constructor(
     configurations: ConfigurationHierarchy,
     val configFile: File,
@@ -1363,7 +1360,7 @@ open class LintXmlConfiguration protected constructor(
             // Write the contents to a new file first such that we don't clobber the
             // existing file if some I/O error occurs.
             val file = File(configFile.parentFile, configFile.name + ".new")
-            val writer: Writer = BufferedWriter(FileWriter(file))
+            val writer: Writer = file.bufferedWriter()
             writer.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<")
             writer.write(TAG_LINT)
             fileClients?.let {
@@ -1637,6 +1634,16 @@ open class LintXmlConfiguration protected constructor(
                 if (registry.isCategoryName(id)) {
                     continue
                 }
+
+                // If this is an inherited configuration, it might be for an issue that is
+                // not applied to all projects. Err on the side of caution here and don't
+                // flag these.
+                val dir = project?.dir
+                val configDir = configFile.parentFile
+                if (dir != null && configDir != null && FileUtil.isAncestor(configDir, dir, true)) {
+                    continue
+                }
+
                 reportNonExistingIssueId(client, driver, registry, project, id)
             } else if (issue.id != id) {
                 // We're using an alias here in the configuration; map it over

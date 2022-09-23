@@ -41,6 +41,7 @@ import com.intellij.psi.PsiConditionalExpression;
 import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiExpression;
 import com.intellij.psi.PsiField;
+import com.intellij.psi.PsiLiteralExpression;
 import com.intellij.psi.PsiLocalVariable;
 import com.intellij.psi.PsiMethod;
 import com.intellij.psi.PsiMethodCallExpression;
@@ -70,8 +71,10 @@ import org.jetbrains.uast.ULiteralExpression;
 import org.jetbrains.uast.UParenthesizedExpression;
 import org.jetbrains.uast.UQualifiedReferenceExpression;
 import org.jetbrains.uast.UReferenceExpression;
+import org.jetbrains.uast.USimpleNameReferenceExpression;
 import org.jetbrains.uast.UastCallKind;
 import org.jetbrains.uast.UastFacade;
+import org.jetbrains.uast.java.UnknownJavaExpression;
 
 /** Evaluates constant expressions */
 public class ResourceEvaluator {
@@ -724,32 +727,37 @@ public class ResourceEvaluator {
             if (annotation != null) {
                 UExpression unit = annotation.findAttributeValue("unit");
                 if (unit instanceof UReferenceExpression) {
+                    String name = null;
                     PsiElement resolved = ((UReferenceExpression) unit).resolve();
                     if (resolved instanceof PsiNamedElement) {
-                        String name = ((PsiNamedElement) resolved).getName();
-                        if ("DP".equals(name)) {
-                            return DIMENSION_DP_MARKER_TYPE;
-                        } else if ("SP".equals(name)) {
-                            return DIMENSION_SP_MARKER_TYPE;
+                        name = ((PsiNamedElement) resolved).getName();
+                    } else {
+                        UElement leaf = UastLintUtilsKt.findSelector(unit);
+                        if (leaf instanceof USimpleNameReferenceExpression) {
+                            name = ((USimpleNameReferenceExpression) leaf).getIdentifier();
                         }
-                        // else: default to PX (DIMENSION_MARKER_TYPE)
+                    }
+                    if ("DP".equals(name)) {
+                        return DIMENSION_DP_MARKER_TYPE;
+                    } else if ("SP".equals(name)) {
+                        return DIMENSION_SP_MARKER_TYPE;
+                    } else if ("PX".equals(name)) {
+                        return DIMENSION_MARKER_TYPE;
+                    } else {
+                        // If we can't resolve the symbol, don't just assume it's a @Px since that
+                        // can lead to
+                        // problems like issue 216139975
+                        return null;
                     }
                 } else if (unit instanceof ULiteralExpression) {
-                    Object value = ((ULiteralExpression) unit).getValue();
-                    if (value instanceof Integer) {
-                        // Constants from Dimension.java:
-                        //   int DP = 0;
-                        //   int PX = 1;
-                        //   int SP = 2;
-                        switch ((Integer) value) {
-                            case 0:
-                                return DIMENSION_DP_MARKER_TYPE;
-                            case 1:
-                                return DIMENSION_MARKER_TYPE;
-                            case 2:
-                                return DIMENSION_SP_MARKER_TYPE;
-                        }
-                    }
+                    return getDimensionFromIntValue(((ULiteralExpression) unit).getValue());
+                } else if (unit != null
+                        && unit.getSourcePsi() instanceof PsiLiteralExpression) { // bytecode
+                    PsiLiteralExpression psi = (PsiLiteralExpression) unit.getSourcePsi();
+                    return getDimensionFromIntValue(psi.getValue());
+                } else if (unit instanceof UnknownJavaExpression) {
+                    // some other PSI problem
+                    return null;
                 }
             }
             return DIMENSION_MARKER_TYPE;
@@ -759,6 +767,29 @@ public class ResourceEvaluator {
             } else {
                 return getTypeFromAnnotationSignature(signature);
             }
+        }
+    }
+
+    @Nullable
+    private static ResourceType getDimensionFromIntValue(Object value) {
+        if (value instanceof Integer) {
+            switch ((Integer) value) {
+                case 0:
+                    return DIMENSION_DP_MARKER_TYPE;
+                case 1:
+                    return DIMENSION_MARKER_TYPE;
+                case 2:
+                    return DIMENSION_SP_MARKER_TYPE;
+                default:
+                    // If it's some other number, it must be a future-added new unit
+                    // type that this
+                    // version of lint doesn't understand; don't process this as a
+                    // resource type
+                    // since it can lead to incorrect comparisons
+                    return null;
+            }
+        } else {
+            return null;
         }
     }
 

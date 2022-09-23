@@ -17,7 +17,6 @@ package com.android.tools.lint.detector.api;
 
 import static com.android.tools.lint.client.api.JavaEvaluatorKt.TYPE_OBJECT;
 import static com.android.tools.lint.client.api.JavaEvaluatorKt.TYPE_STRING;
-import static org.jetbrains.uast.UastBinaryExpressionWithTypeKind.TYPE_CAST;
 
 import com.android.annotations.NonNull;
 import com.android.annotations.Nullable;
@@ -62,6 +61,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import kotlin.text.StringsKt;
+import org.jetbrains.kotlin.asJava.elements.KtLightField;
+import org.jetbrains.kotlin.asJava.elements.KtLightMethod;
 import org.jetbrains.kotlin.asJava.elements.KtLightPsiLiteral;
 import org.jetbrains.kotlin.psi.KtDeclaration;
 import org.jetbrains.kotlin.psi.KtExpression;
@@ -87,6 +88,7 @@ import org.jetbrains.uast.UReferenceExpression;
 import org.jetbrains.uast.UResolvable;
 import org.jetbrains.uast.USimpleNameReferenceExpression;
 import org.jetbrains.uast.UVariable;
+import org.jetbrains.uast.UastBinaryExpressionWithTypeKind;
 import org.jetbrains.uast.UastBinaryOperator;
 import org.jetbrains.uast.UastFacade;
 import org.jetbrains.uast.UastPrefixOperator;
@@ -212,7 +214,8 @@ public class ConstantEvaluator {
                 return result;
             }
         } else if (node instanceof UBinaryExpressionWithType
-                && ((UBinaryExpressionWithType) node).getOperationKind() == TYPE_CAST) {
+                && ((UBinaryExpressionWithType) node).getOperationKind()
+                        == UastBinaryExpressionWithTypeKind.TypeCast.INSTANCE) {
             UBinaryExpressionWithType cast = (UBinaryExpressionWithType) node;
             Object operandValue = evaluate(cast.getOperand());
             if (operandValue instanceof Number) {
@@ -275,14 +278,7 @@ public class ConstantEvaluator {
                             return value;
                         }
                     }
-                    //noinspection KotlinInternalInJava
-                    if (field
-                            instanceof
-                            org.jetbrains
-                                    .kotlin
-                                    .asJava
-                                    .classes
-                                    .KtUltraLightFieldForSourceDeclaration) {
+                    if (field instanceof KtLightField) {
                         Object fieldValue = evaluate(field);
                         if (fieldValue != null) {
                             return fieldValue;
@@ -2481,30 +2477,12 @@ public class ConstantEvaluator {
             // it has a constant expression and no getters and setters (and is not a var), then
             // compute
             // its value anyway.
-            //noinspection KotlinInternalInJava
-            if (node
-                    instanceof
-                    org.jetbrains.kotlin.asJava.classes.KtUltraLightMethodForSourceDeclaration) {
-                //noinspection KotlinInternalInJava
-                return valueFromProperty(
-                        ((org.jetbrains
-                                                .kotlin
-                                                .asJava
-                                                .classes
-                                                .KtUltraLightMethodForSourceDeclaration)
-                                        node)
-                                .getKotlinOrigin());
+            if (node instanceof KtLightMethod) {
+                return valueFromProperty(((KtLightMethod) node).getKotlinOrigin());
             }
 
-            //noinspection KotlinInternalInJava
-            if (node
-                    instanceof
-                    org.jetbrains.kotlin.asJava.classes.KtUltraLightFieldForSourceDeclaration) {
-                //noinspection KotlinInternalInJava
-                return valueFromProperty(
-                        ((org.jetbrains.kotlin.asJava.classes.KtUltraLightFieldForSourceDeclaration)
-                                        node)
-                                .getKotlinOrigin());
+            if (node instanceof KtLightField) {
+                return valueFromProperty(((KtLightField) node).getKotlinOrigin());
             }
 
             if (node instanceof KtProperty) {
